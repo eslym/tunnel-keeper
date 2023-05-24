@@ -281,7 +281,8 @@ func createConfig(sshUser string, keyPaths []string, homeDir string, sshAgent ag
 		// Read the private key file
 		privateKey, err := ioutil.ReadFile(keyPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read private key file: %v", err)
+			log.Printf("failed to read private key file: %v", err)
+			continue
 		}
 
 		// Create a signer for the private key

@@ -122,7 +122,7 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 		go func(opt Forward) {
 			defer wg.Done()
 			// Start remote listener
-			remoteListener, err := conn.Listen("tcp", fmt.Sprintf(":%d", opt.SrcPort))
+			remoteListener, err := conn.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
 			if err != nil {
 				log.Printf("Failed to start remote listener: %v", err)
 				return
@@ -146,7 +146,7 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 				log.Printf("%s -> (S) -> (L) -> %s:%d", remoteConn.RemoteAddr(), opt.DestHost, opt.DestPort)
 
 				// Start local forwarding
-				go forwardRemote(remoteConn, fmt.Sprintf("localhost:%d", opt.DestPort))
+				go forwardRemote(remoteConn, fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
 			}
 		}(opt)
 	}
@@ -384,21 +384,18 @@ func forwardRemote(remoteConn net.Conn, localAddr string) {
 		remoteConn.Close()
 		return
 	}
+
 	//goland:noinspection GoUnhandledErrorResult
 	defer localConn.Close()
+	//goland:noinspection GoUnhandledErrorResult
+	defer remoteConn.Close()
 
 	// Copy data between remote and local connections
 	go func() {
-		_, err := pipeTo(remoteConn, localConn)
-		if err != nil {
-			log.Printf("Error copying data from remote to local: %v", err)
-		}
+		_, _ = pipeTo(remoteConn, localConn)
 	}()
 
-	_, err = pipeTo(localConn, remoteConn)
-	if err != nil {
-		log.Printf("Error copying data from local to remote: %v", err)
-	}
+	_, _ = pipeTo(localConn, remoteConn)
 }
 
 func pipeTo(dst net.Conn, src net.Conn) (int64, error) {

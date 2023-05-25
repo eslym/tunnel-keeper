@@ -15,7 +15,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -36,6 +35,7 @@ var opts struct {
 	RemoteForwards []string `short:"R" long:"remote" description:"Forward from remote"`
 	LocalForwards  []string `short:"L" long:"local" description:"Forward to remote"`
 	Identities     []string `short:"i" long:"identity" description:"Key files"`
+	KeepAlive      int      `short:"k" long:"keep-alive" description:"Keep alive interval (seconds)" default:"5"`
 }
 
 var sshRemote SSHRemote
@@ -103,6 +103,34 @@ func main() {
 	}
 }
 
+func setupForward(listener *net.Listener, dialer func(src net.Conn) (net.Conn, error)) {
+	for {
+		srcConn, err := (*listener).Accept()
+		if err != nil {
+			log.Printf("Failed to accept incoming connection: %v", err)
+			return
+		}
+
+		destConn, err := dialer(srcConn)
+		if err != nil {
+			log.Printf("Failed to establish connection: %v", err)
+			continue
+		}
+
+		// Start remote forwarding
+		go forwardConnection(srcConn, destConn)
+	}
+}
+
+func forwardConnection(src net.Conn, dest net.Conn) {
+	defer func() {
+		_ = src.Close()
+		_ = dest.Close()
+	}()
+	go pipeTo(src, dest)
+	pipeTo(dest, src)
+}
+
 func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 	// Connect to SSH server
 	conn, err := ssh.Dial("tcp", hostPort, config)
@@ -112,58 +140,85 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 		return false
 	}
 
-	//goland:noinspection GoUnhandledErrorResult
-	defer conn.Close()
+	var listeners []*net.Listener
 
-	wg := sync.WaitGroup{}
+	stop := make(chan bool)
+
+	defer func() {
+		_ = conn.Close()
+		for _, listener := range listeners {
+			_ = (*listener).Close()
+		}
+	}()
 
 	for _, opt := range remoteForwards {
-		wg.Add(1)
 		go func(opt Forward) {
-			defer wg.Done()
 			// Start remote listener
 			remoteListener, err := conn.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
 			if err != nil {
 				log.Printf("Failed to start remote listener: %v", err)
+				stop <- true
 				return
 			}
+			listeners = append(listeners, &remoteListener)
 
-			defer func(remoteListener net.Listener) {
-				//goland:noinspection GoUnhandledErrorResult,GoDeferInLoop
-				remoteListener.Close()
-			}(remoteListener)
+			log.Printf("Tunnel (R) %s:%d -> (L) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
 
-			log.Printf("Tunnel (S) %s:%d -> (L) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
+			setupForward(&remoteListener, func(src net.Conn) (net.Conn, error) {
+				dest, err := conn.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
 
-			// Accept connections on remote listener
-			for {
-				remoteConn, err := remoteListener.Accept()
-				if err != nil {
-					log.Printf("Failed to accept incoming connection: %v", err)
-					break
+				if err == nil {
+					log.Printf("Froward %s -> (R) %s:%d -> (L) -> %s:%d", src.RemoteAddr(), opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
 				}
 
-				log.Printf("%s -> (S) -> (L) -> %s:%d", remoteConn.RemoteAddr(), opt.DestHost, opt.DestPort)
-
-				// Start local forwarding
-				go forwardRemote(remoteConn, fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
-			}
+				return dest, err
+			})
 		}(opt)
 	}
 
 	for _, opt := range localForwards {
-		wg.Add(1)
 		go func(opt Forward) {
-			defer wg.Done()
-			err := forwardLocal(opt, conn)
+			// Start local listener
+			localListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
 			if err != nil {
-				log.Printf("Failed to listen on local: %v", err)
+				log.Printf("Failed to start local listener: %v", err)
+				stop <- true
 				return
 			}
+			listeners = append(listeners, &localListener)
+
+			log.Printf("Tunnel (L) %s:%d -> (R) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
+
+			setupForward(&localListener, func(src net.Conn) (net.Conn, error) {
+				dest, err := conn.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
+
+				if err == nil {
+					log.Printf("Froward %s -> (L) %s:%d -> (R) -> %s:%d", src.RemoteAddr(), opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
+				}
+
+				return dest, err
+			})
 		}(opt)
 	}
 
-	wg.Wait()
+	if opts.KeepAlive > 0 {
+		// Keep the connection alive
+		go func() {
+			ticker := time.NewTicker(time.Duration(opts.KeepAlive) * time.Second)
+			for {
+				<-ticker.C
+				_, _, err = conn.SendRequest("keep-alive@golang.org", true, nil)
+				if err != nil {
+					log.Printf("Failed to send keep-alive: %v", err)
+					ticker.Stop()
+					stop <- true
+					return
+				}
+			}
+		}()
+	}
+
+	<-stop
 
 	return true
 }
@@ -252,12 +307,10 @@ func getSSHConfig(sshRemote SSHRemote, sshAgent agent.Agent) (*ssh.ClientConfig,
 	keyPaths := ssh_config.GetAll(remote.Host, "IdentityFile")
 
 	if len(keyPaths) == 0 {
-		keyPaths = []string{"~/.ssh/id_rsa"}
+		keyPaths = append(keyPaths, "~/.ssh/id_rsa", "~/.ssh/id_dsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519")
 	}
 
-	log.Printf("Using SSH user: %s", remote.Username)
-	log.Printf("Using SSH host: %s", remote.Host)
-	log.Printf("Using SSH port: %d", remote.Port)
+	log.Printf("Connected to: %s@%s:%d", remote.Username, remote.Host, remote.Port)
 
 	cfg, err := createConfig(remote.Username, keyPaths, usr.HomeDir, sshAgent)
 	if err != nil {
@@ -326,81 +379,7 @@ func createConfig(sshUser string, keyPaths []string, homeDir string, sshAgent ag
 	return clientConfig, nil
 }
 
-func forwardLocal(fw Forward, client *ssh.Client) error {
-	// Listen on local
-	localListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", fw.SrcHost, fw.SrcPort))
-	if err != nil {
-		return fmt.Errorf("failed to listen on local port: %v", err)
-	}
-
-	//goland:noinspection GoUnhandledErrorResult
-	defer localListener.Close()
-	log.Printf("Tunnel (S) %s:%d <- (L) %s:%d ", fw.DestHost, fw.DestPort, fw.SrcHost, fw.SrcPort)
-
-	for {
-		// Accept local connections
-		localConn, err := localListener.Accept()
-		if err != nil {
-			log.Printf("Failed to accept local connection: %v", err)
-			//goland:noinspection GoUnhandledErrorResult
-			localListener.Close()
-			break
-		}
-
-		// Connect to remote address
-		remoteConn, err := client.Dial("tcp", fmt.Sprintf("%s:%d", fw.DestHost, fw.DestPort))
-		if err != nil {
-			log.Printf("Failed to connect to remote server: %v", err)
-			//goland:noinspection GoUnhandledErrorResult
-			localConn.Close()
-			continue
-		}
-
-		log.Printf("(S) %s:%d <- (L) <- %s", fw.DestHost, fw.DestPort, localConn.RemoteAddr())
-
-		go func() {
-			_, _ = pipeTo(remoteConn, localConn)
-			_ = localConn.Close()
-			_ = remoteConn.Close()
-		}()
-
-		go func() {
-			// Copy data between local and remote connections
-			_, _ = pipeTo(localConn, remoteConn)
-			_ = localConn.Close()
-			_ = remoteConn.Close()
-		}()
-	}
-
-	return nil
-}
-
-func forwardRemote(remoteConn net.Conn, localAddr string) {
-	// Connect to local address
-	localConn, err := net.Dial("tcp", localAddr)
-	if err != nil {
-		log.Printf("Failed to connect to local server: %v", err)
-		//goland:noinspection GoUnhandledErrorResult
-		remoteConn.Close()
-		return
-	}
-
-	//goland:noinspection GoUnhandledErrorResult
-	defer localConn.Close()
-	//goland:noinspection GoUnhandledErrorResult
-	defer remoteConn.Close()
-
-	// Copy data between remote and local connections
-	go func() {
-		_, _ = pipeTo(remoteConn, localConn)
-	}()
-
-	_, _ = pipeTo(localConn, remoteConn)
-}
-
-func pipeTo(dst net.Conn, src net.Conn) (int64, error) {
-	var totalBytes int64
-
+func pipeTo(dst net.Conn, src net.Conn) {
 	buf := make([]byte, 0x4000)
 	for {
 		n, err := src.Read(buf)
@@ -408,18 +387,10 @@ func pipeTo(dst net.Conn, src net.Conn) (int64, error) {
 			if err == io.EOF {
 				break
 			}
-			return totalBytes, err
 		}
 
-		n, err = dst.Write(buf[:n])
-		if err != nil {
-			return totalBytes, err
-		}
-
-		totalBytes += int64(n)
+		_, err = dst.Write(buf[:n])
 	}
-
-	return totalBytes, nil
 }
 
 func parseForward(str string) (Forward, error) {

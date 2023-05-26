@@ -83,7 +83,7 @@ func main() {
 			log.Printf("Failed to get SSH client config: %v", err)
 		}
 
-		if dailSSH(fmt.Sprintf("%s:%d", sshRemote.Host, port), config) {
+		if dailSSH(fmt.Sprintf("%s:%d", sshRemote.Host, port), config, args[1:]) {
 			retryAttempts = 0
 		}
 
@@ -123,7 +123,7 @@ func forwardConnection(src net.Conn, dest net.Conn) {
 	pipeTo(dest, src)
 }
 
-func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
+func dailSSH(hostPort string, config *ssh.ClientConfig, args []string) bool {
 	remote, err := ssh.Dial("tcp", hostPort, config)
 
 	if err != nil {
@@ -205,6 +205,21 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 				}
 			}
 		}()
+	}
+
+	if len(args) > 0 {
+		session, err := remote.NewSession()
+		if err != nil {
+			log.Printf("Failed to create session: %v", err)
+			return false
+		}
+		out, err := session.CombinedOutput(strings.Join(args, " "))
+		fmt.Printf("%s", out)
+		if err != nil {
+			log.Printf("Failed to execute command: %v", err)
+			return false
+		}
+		_ = session.Close()
 	}
 
 	<-stop

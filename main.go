@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/jessevdk/go-flags"
+	"github.com/Potterli20/go-flags-fork"
 	"github.com/kevinburke/ssh_config"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -35,6 +35,9 @@ var opts struct {
 	LocalForwards  []string `short:"L" long:"local" description:"Forward to remote"`
 	Identities     []string `short:"i" long:"identity" description:"Key files"`
 	KeepAlive      int      `short:"k" long:"keep-alive" description:"Keep alive interval (seconds)" default:"5"`
+	Positional     struct {
+		Remote string `description:"Remote host, format: [user]@<host>:[port]" positional-arg-name:"remote" required:"yes"`
+	} `positional-args:"yes"`
 }
 
 var sshRemote SSHRemote
@@ -44,12 +47,11 @@ var remoteForwards []Forward
 func main() {
 	args, err := flags.Parse(&opts)
 
-	if len(args) < 1 {
-		log.Fatalf("Usage: tunnel-keeper [OPTIONS] <user@host>")
+	if err != nil {
 		return
 	}
 
-	sshRemote, err = parseSSHRemote(args[0])
+	sshRemote, err = parseSSHRemote(opts.Positional.Remote)
 	if err != nil {
 		log.Fatalf("Failed to parse SSH remote: %v", err)
 	}
@@ -83,7 +85,7 @@ func main() {
 			log.Printf("Failed to get SSH client config: %v", err)
 		}
 
-		if dailSSH(fmt.Sprintf("%s:%d", sshRemote.Host, port), config, args[1:]) {
+		if dailSSH(fmt.Sprintf("%s:%d", sshRemote.Host, port), config, args) {
 			retryAttempts = 0
 		}
 

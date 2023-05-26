@@ -6,7 +6,6 @@ import (
 	"github.com/kevinburke/ssh_config"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-	"io"
 	"io/ioutil"
 	"log"
 	"math"
@@ -15,6 +14,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,6 +41,8 @@ var opts struct {
 var sshRemote SSHRemote
 var localForwards []Forward
 var remoteForwards []Forward
+var connections []net.Conn
+var connectionsLock = &sync.Mutex{}
 
 func main() {
 	args, err := flags.Parse(&opts)
@@ -111,22 +113,25 @@ func setupForward(stop chan bool, listener *net.Listener, dialer func(src net.Co
 		destConn, err := dialer(srcConn)
 		if err != nil {
 			log.Printf("Failed to establish connection: %v", err)
+			_ = srcConn.Close()
 			continue
 		}
+
+		addConnection(srcConn, destConn)
 
 		go forwardConnection(srcConn, destConn)
 	}
 }
 
 func forwardConnection(src net.Conn, dest net.Conn) {
-	defer func() {
-		_ = src.Close()
-		_ = dest.Close()
-	}()
-	closeSignal := make(chan bool)
-	go pipeTo(closeSignal, src, dest)
-	pipeTo(nil, dest, src)
-	<-closeSignal
+	go pipeTo(src, dest)
+	pipeTo(dest, src)
+}
+
+func addConnection(conn ...net.Conn) {
+	connectionsLock.Lock()
+	connections = append(connections, conn...)
+	connectionsLock.Unlock()
 }
 
 func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
@@ -146,20 +151,24 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 		for _, listener := range listeners {
 			_ = (*listener).Close()
 		}
+		for _, connection := range connections {
+			_ = connection.Close()
+		}
+		connections = []net.Conn{}
 	}()
 
 	for _, opt := range remoteForwards {
+		remoteListener, err := conn.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
+		if err != nil {
+			log.Printf("Failed to start remote listener: %v", err)
+			return true
+		}
+
+		listeners = append(listeners, &remoteListener)
+
+		log.Printf("Tunnel (R) %s:%d -> (L) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
+
 		go func(opt Forward) {
-			remoteListener, err := conn.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
-			if err != nil {
-				log.Printf("Failed to start remote listener: %v", err)
-				stop <- true
-				return
-			}
-			listeners = append(listeners, &remoteListener)
-
-			log.Printf("Tunnel (R) %s:%d -> (L) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
-
 			setupForward(stop, &remoteListener, func(src net.Conn) (net.Conn, error) {
 				dest, err := conn.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
 
@@ -173,17 +182,16 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 	}
 
 	for _, opt := range localForwards {
+		localListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
+		if err != nil {
+			log.Printf("Failed to start local listener: %v", err)
+			return true
+		}
+		listeners = append(listeners, &localListener)
+
+		log.Printf("Tunnel (L) %s:%d -> (R) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
+
 		go func(opt Forward) {
-			localListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
-			if err != nil {
-				log.Printf("Failed to start local listener: %v", err)
-				stop <- true
-				return
-			}
-			listeners = append(listeners, &localListener)
-
-			log.Printf("Tunnel (L) %s:%d -> (R) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
-
 			setupForward(stop, &localListener, func(src net.Conn) (net.Conn, error) {
 				dest, err := conn.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
 
@@ -373,21 +381,17 @@ func createConfig(sshUser string, keyPaths []string, homeDir string, sshAgent ag
 	return clientConfig, nil
 }
 
-func pipeTo(closeSignal chan bool, dst net.Conn, src net.Conn) {
+func pipeTo(dst net.Conn, src net.Conn) {
 	buf := make([]byte, 0x4000)
 	for {
 		n, err := src.Read(buf)
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
+			break
 		}
-
 		_, err = dst.Write(buf[:n])
 	}
-	if closeSignal != nil {
-		closeSignal <- true
-	}
+	_ = src.Close()
+	_ = dst.Close()
 }
 
 func parseForward(str string) (Forward, error) {

@@ -123,8 +123,10 @@ func forwardConnection(src net.Conn, dest net.Conn) {
 		_ = src.Close()
 		_ = dest.Close()
 	}()
-	go pipeTo(src, dest)
-	pipeTo(dest, src)
+	closeSignal := make(chan bool)
+	go pipeTo(closeSignal, src, dest)
+	pipeTo(nil, dest, src)
+	<-closeSignal
 }
 
 func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
@@ -371,7 +373,7 @@ func createConfig(sshUser string, keyPaths []string, homeDir string, sshAgent ag
 	return clientConfig, nil
 }
 
-func pipeTo(dst net.Conn, src net.Conn) {
+func pipeTo(closeSignal chan bool, dst net.Conn, src net.Conn) {
 	buf := make([]byte, 0x4000)
 	for {
 		n, err := src.Read(buf)
@@ -382,6 +384,9 @@ func pipeTo(dst net.Conn, src net.Conn) {
 		}
 
 		_, err = dst.Write(buf[:n])
+	}
+	if closeSignal != nil {
+		closeSignal <- true
 	}
 }
 

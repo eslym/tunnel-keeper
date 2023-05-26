@@ -170,7 +170,7 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 
 		go func(opt Forward) {
 			setupForward(stop, &remoteListener, func(src net.Conn) (net.Conn, error) {
-				dest, err := conn.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
+				dest, err := net.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
 
 				if err == nil {
 					log.Printf("Froward %s -> (R) %s:%d -> (L) -> %s:%d", src.RemoteAddr(), opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)

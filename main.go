@@ -14,7 +14,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -41,8 +40,6 @@ var opts struct {
 var sshRemote SSHRemote
 var localForwards []Forward
 var remoteForwards []Forward
-var connections []net.Conn
-var connectionsLock = &sync.Mutex{}
 
 func main() {
 	args, err := flags.Parse(&opts)
@@ -117,8 +114,6 @@ func setupForward(stop chan bool, listener net.Listener, dialer func(src net.Con
 			continue
 		}
 
-		addConnection(srcConn, destConn)
-
 		go forwardConnection(srcConn, destConn)
 	}
 }
@@ -126,12 +121,6 @@ func setupForward(stop chan bool, listener net.Listener, dialer func(src net.Con
 func forwardConnection(src net.Conn, dest net.Conn) {
 	go pipeTo(src, dest)
 	pipeTo(dest, src)
-}
-
-func addConnection(conn ...net.Conn) {
-	connectionsLock.Lock()
-	connections = append(connections, conn...)
-	connectionsLock.Unlock()
 }
 
 func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
@@ -151,10 +140,6 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 		for _, listener := range listeners {
 			_ = listener.Close()
 		}
-		for _, connection := range connections {
-			_ = connection.Close()
-		}
-		connections = []net.Conn{}
 	}()
 
 	for _, opt := range remoteForwards {

@@ -101,9 +101,9 @@ func main() {
 	}
 }
 
-func setupForward(stop chan bool, listener *net.Listener, dialer func(src net.Conn) (net.Conn, error)) {
+func setupForward(stop chan bool, listener net.Listener, dialer func(src net.Conn) (net.Conn, error)) {
 	for {
-		srcConn, err := (*listener).Accept()
+		srcConn, err := listener.Accept()
 		if err != nil {
 			log.Printf("Failed to accept incoming connection: %v", err)
 			stop <- true
@@ -135,21 +135,21 @@ func addConnection(conn ...net.Conn) {
 }
 
 func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
-	conn, err := ssh.Dial("tcp", hostPort, config)
+	remote, err := ssh.Dial("tcp", hostPort, config)
 
 	if err != nil {
 		log.Printf("Failed to connect to SSH server: %v", err)
 		return false
 	}
 
-	var listeners []*net.Listener
+	var listeners []net.Listener
 
 	stop := make(chan bool)
 
 	defer func() {
-		_ = conn.Close()
+		_ = remote.Close()
 		for _, listener := range listeners {
-			_ = (*listener).Close()
+			_ = listener.Close()
 		}
 		for _, connection := range connections {
 			_ = connection.Close()
@@ -158,25 +158,25 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 	}()
 
 	for _, opt := range remoteForwards {
-		remoteListener, err := conn.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
+		remoteListener, err := remote.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
 		if err != nil {
 			log.Printf("Failed to start remote listener: %v", err)
 			return true
 		}
 
-		listeners = append(listeners, &remoteListener)
+		listeners = append(listeners, remoteListener)
 
 		log.Printf("Tunnel (R) %s:%d -> (L) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
 
 		go func(opt Forward) {
-			setupForward(stop, &remoteListener, func(src net.Conn) (net.Conn, error) {
-				dest, err := net.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
+			setupForward(stop, remoteListener, func(src net.Conn) (net.Conn, error) {
+				localConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
 
 				if err == nil {
 					log.Printf("Froward %s -> (R) %s:%d -> (L) -> %s:%d", src.RemoteAddr(), opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
 				}
 
-				return dest, err
+				return localConn, err
 			})
 		}(opt)
 	}
@@ -187,19 +187,19 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 			log.Printf("Failed to start local listener: %v", err)
 			return true
 		}
-		listeners = append(listeners, &localListener)
+		listeners = append(listeners, localListener)
 
 		log.Printf("Tunnel (L) %s:%d -> (R) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
 
 		go func(opt Forward) {
-			setupForward(stop, &localListener, func(src net.Conn) (net.Conn, error) {
-				dest, err := conn.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
+			setupForward(stop, localListener, func(src net.Conn) (net.Conn, error) {
+				remoteConn, err := remote.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
 
 				if err == nil {
 					log.Printf("Froward %s -> (L) %s:%d -> (R) -> %s:%d", src.RemoteAddr(), opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
 				}
 
-				return dest, err
+				return remoteConn, err
 			})
 		}(opt)
 	}
@@ -211,7 +211,7 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 		go func() {
 			for {
 				<-ticker.C
-				_, _, err = conn.SendRequest("keep-alive@golang.org", true, nil)
+				_, _, err = remote.SendRequest("keep-alive@golang.org", true, nil)
 				if err != nil {
 					log.Printf("Failed to send keep-alive: %v", err)
 					ticker.Stop()

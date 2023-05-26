@@ -55,7 +55,6 @@ func main() {
 		log.Fatalf("Failed to parse SSH remote: %v", err)
 	}
 
-	// Parse local forwards
 	for _, str := range opts.LocalForwards {
 		forward, err := parseForward(str)
 		if err != nil {
@@ -64,7 +63,6 @@ func main() {
 		localForwards = append(localForwards, forward)
 	}
 
-	// Parse remote forwards
 	for _, str := range opts.RemoteForwards {
 		forward, err := parseForward(str)
 		if err != nil {
@@ -81,7 +79,6 @@ func main() {
 			log.Printf("Failed to get SSH agent: %v", err)
 		}
 
-		// Get the SSH client config
 		config, port, err := getSSHConfig(sshRemote, sshAgent)
 		if err != nil {
 			log.Printf("Failed to get SSH client config: %v", err)
@@ -91,10 +88,9 @@ func main() {
 			retryAttempts = 0
 		}
 
-		// Calculate the next retry duration using exponential backoff
-		retryDelay := math.Pow(2, float64(retryAttempts)) * 5 // seconds
+		retryDelay := math.Pow(2, float64(retryAttempts)) * 5
 		if retryDelay > 300 {
-			retryDelay = 300 // cap at 5 minutes
+			retryDelay = 300
 		}
 		log.Printf("Retrying in %d seconds...\n", int(retryDelay))
 		time.Sleep(time.Duration(retryDelay) * time.Second)
@@ -103,11 +99,12 @@ func main() {
 	}
 }
 
-func setupForward(listener *net.Listener, dialer func(src net.Conn) (net.Conn, error)) {
+func setupForward(stop chan bool, listener *net.Listener, dialer func(src net.Conn) (net.Conn, error)) {
 	for {
 		srcConn, err := (*listener).Accept()
 		if err != nil {
 			log.Printf("Failed to accept incoming connection: %v", err)
+			stop <- true
 			return
 		}
 
@@ -117,7 +114,6 @@ func setupForward(listener *net.Listener, dialer func(src net.Conn) (net.Conn, e
 			continue
 		}
 
-		// Start remote forwarding
 		go forwardConnection(srcConn, destConn)
 	}
 }
@@ -132,7 +128,6 @@ func forwardConnection(src net.Conn, dest net.Conn) {
 }
 
 func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
-	// Connect to SSH server
 	conn, err := ssh.Dial("tcp", hostPort, config)
 
 	if err != nil {
@@ -153,7 +148,6 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 
 	for _, opt := range remoteForwards {
 		go func(opt Forward) {
-			// Start remote listener
 			remoteListener, err := conn.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
 			if err != nil {
 				log.Printf("Failed to start remote listener: %v", err)
@@ -164,7 +158,7 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 
 			log.Printf("Tunnel (R) %s:%d -> (L) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
 
-			setupForward(&remoteListener, func(src net.Conn) (net.Conn, error) {
+			setupForward(stop, &remoteListener, func(src net.Conn) (net.Conn, error) {
 				dest, err := conn.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
 
 				if err == nil {
@@ -178,7 +172,6 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 
 	for _, opt := range localForwards {
 		go func(opt Forward) {
-			// Start local listener
 			localListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
 			if err != nil {
 				log.Printf("Failed to start local listener: %v", err)
@@ -189,7 +182,7 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 
 			log.Printf("Tunnel (L) %s:%d -> (R) %s:%d ", opt.SrcHost, opt.SrcPort, opt.DestHost, opt.DestPort)
 
-			setupForward(&localListener, func(src net.Conn) (net.Conn, error) {
+			setupForward(stop, &localListener, func(src net.Conn) (net.Conn, error) {
 				dest, err := conn.Dial("tcp", fmt.Sprintf("%s:%d", opt.DestHost, opt.DestPort))
 
 				if err == nil {
@@ -202,9 +195,10 @@ func dailSSH(hostPort string, config *ssh.ClientConfig) bool {
 	}
 
 	if opts.KeepAlive > 0 {
-		// Keep the connection alive
+		ticker := time.NewTicker(time.Duration(opts.KeepAlive) * time.Second)
+		defer ticker.Stop()
+
 		go func() {
-			ticker := time.NewTicker(time.Duration(opts.KeepAlive) * time.Second)
 			for {
 				<-ticker.C
 				_, _, err = conn.SendRequest("keep-alive@golang.org", true, nil)
@@ -355,7 +349,6 @@ func createConfig(sshUser string, keyPaths []string, homeDir string, sshAgent ag
 
 		signers = append(signers, configSigners...)
 
-		// Create the client config with the SSH agent
 		clientConfig := &ssh.ClientConfig{
 			User: sshUser,
 			Auth: []ssh.AuthMethod{
@@ -367,7 +360,6 @@ func createConfig(sshUser string, keyPaths []string, homeDir string, sshAgent ag
 		return clientConfig, nil
 	}
 
-	// Create the default client config
 	clientConfig := &ssh.ClientConfig{
 		User: sshUser,
 		Auth: []ssh.AuthMethod{
@@ -446,7 +438,6 @@ func parseForward(str string) (Forward, error) {
 	return fw, nil
 }
 
-// split string with colon, but ignore colon in square brackets
 func splitParts(str string) ([]string, error) {
 	var parts []string
 	var part string

@@ -126,12 +126,14 @@ func forwardConnection(src net.Conn, dest net.Conn) {
 }
 
 func dailSSH(hostPort string, config *ssh.ClientConfig, args []string) bool {
-	remote, err := ssh.Dial("tcp", hostPort, config)
+	client, err := ssh.Dial("tcp", hostPort, config)
 
 	if err != nil {
 		log.Printf("Failed to connect to SSH server: %v", err)
 		return false
 	}
+
+	remote := WrapClient(client)
 
 	var listeners []net.Listener
 
@@ -145,7 +147,7 @@ func dailSSH(hostPort string, config *ssh.ClientConfig, args []string) bool {
 	}()
 
 	for _, opt := range remoteForwards {
-		remoteListener, err := remote.Listen("tcp", fmt.Sprintf("%s:%d", opt.SrcHost, opt.SrcPort))
+		remoteListener, err := remote.ListenAlt(opt.SrcHost, uint32(opt.SrcPort))
 		if err != nil {
 			log.Printf("Failed to start remote listener: %v", err)
 			return true
@@ -312,9 +314,7 @@ func getSSHConfig(sshRemote SSHRemote, sshAgent agent.Agent) (*ssh.ClientConfig,
 
 	keyPaths := ssh_config.GetAll(remote.Host, "IdentityFile")
 
-	if len(keyPaths) == 0 {
-		keyPaths = append(keyPaths, "~/.ssh/id_rsa", "~/.ssh/id_dsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519")
-	}
+	keyPaths = append(keyPaths, "~/.ssh/id_rsa", "~/.ssh/id_dsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519")
 
 	log.Printf("Connected to: %s@%s:%d", remote.Username, remote.Host, remote.Port)
 
@@ -457,8 +457,10 @@ func splitParts(str string) ([]string, error) {
 	for _, c := range str {
 		if c == '[' {
 			inBrackets = true
+			continue
 		} else if c == ']' {
 			inBrackets = false
+			continue
 		} else if c == ':' && !inBrackets {
 			parts = append(parts, part)
 			part = ""

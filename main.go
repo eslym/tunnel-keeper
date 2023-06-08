@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -234,33 +235,38 @@ func dailSSH(hostPort string, config *ssh.ClientConfig, args []string) bool {
 func parseSSHRemote(info string) (SSHRemote, error) {
 	// Split the info string into user, host, and port
 	parts := strings.SplitN(info, "@", 2)
+	res := SSHRemote{Port: -1}
+	var hostPort string
 	if len(parts) == 1 {
-		return SSHRemote{Host: parts[0], Port: -1, Username: ""}, nil // No username and default port
+		hostPort = parts[0]
 	} else if len(parts) == 2 {
-		username := parts[0]
-		hostPort := parts[1]
-		port := -1 // default SSH port
-
-		if strings.Contains(hostPort, ":") {
-			host, portStr, err := net.SplitHostPort(hostPort)
-			if err != nil {
-				return SSHRemote{}, fmt.Errorf("failed to parse host:port: %v", err)
-			}
-
-			if portStr != "" {
-				_, err := fmt.Sscanf(portStr, "%d", &port)
-				if err != nil {
-					return SSHRemote{}, fmt.Errorf("failed to parse port: %v", err)
-				}
-			}
-
-			return SSHRemote{Host: host, Port: port, Username: username}, nil
-		}
-
-		return SSHRemote{Host: hostPort, Port: port, Username: username}, nil
+		res.Username = parts[0]
+		hostPort = parts[1]
 	}
 
-	return SSHRemote{}, fmt.Errorf("invalid format for SSH remote: %s", info)
+	if strings.Contains(hostPort, ":") {
+		host, portStr, err := net.SplitHostPort(hostPort)
+
+		if err != nil {
+			return SSHRemote{}, fmt.Errorf("failed to parse host:port: %v", err)
+		}
+
+		res.Host = host
+
+		if portStr != "" {
+			res.Port, err = strconv.Atoi(portStr)
+			if err != nil {
+				return SSHRemote{}, fmt.Errorf("failed to parse port: %v", err)
+			}
+			if res.Port < 1 || res.Port > 65535 {
+				return SSHRemote{}, fmt.Errorf("invalid port: %d", res.Port)
+			}
+		}
+	} else {
+		res.Host = hostPort
+	}
+
+	return res, nil
 }
 
 func getSSHAgent() (agent.Agent, error) {

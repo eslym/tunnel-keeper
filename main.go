@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"github.com/Potterli20/go-flags-fork"
 	"github.com/kevinburke/ssh_config"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"io"
 	"io/ioutil"
 	"log"
 	"math"
@@ -212,19 +214,37 @@ func dailSSH(hostPort string, config *ssh.ClientConfig, args []string) bool {
 		}()
 	}
 
-	if len(args) > 0 {
-		session, err := remote.NewSession()
-		if err != nil {
-			log.Printf("Failed to create session: %v", err)
+	ses, err := remote.NewSession()
+
+	if err != nil {
+		log.Printf("Failed to create session: %v", err)
+		return false
+	}
+
+	if err == nil {
+		stdout, e := ses.StdoutPipe()
+		if e != nil {
+			log.Printf("Failed setup session IO: %v", e)
 			return false
 		}
-		out, err := session.CombinedOutput(strings.Join(args, " "))
-		fmt.Printf("%s", out)
-		if err != nil {
-			log.Printf("Failed to execute command: %v", err)
+		stderr, e := ses.StderrPipe()
+		if e != nil {
+			log.Printf("Failed setup session IO: %v", e)
 			return false
 		}
-		_ = session.Close()
+		if len(args) == 0 {
+			err = ses.Shell()
+		} else {
+			err = ses.Start(strings.Join(args, " "))
+		}
+		if err != nil {
+			log.Printf("Failed to start session: %v", err)
+			return false
+		}
+		go readLine(stdout, "[STDOUT]")
+		go readLine(stderr, "[STDERR]")
+	} else {
+		log.Printf("Failed to start shell for logging: %v", err)
 	}
 
 	<-stop
@@ -485,4 +505,11 @@ func splitParts(str string) ([]string, error) {
 	}
 
 	return parts, nil
+}
+
+func readLine(input io.Reader, prefix string) {
+	scanner := bufio.NewScanner(input)
+	for scanner.Scan() {
+		log.Printf("%s %s\n", prefix, scanner.Text())
+	}
 }

@@ -229,6 +229,21 @@ func (l *forwardListAlt) handleChannels(in <-chan ssh.NewChannel) {
 			}
 
 			binding = net.JoinHostPort(payload.Addr, strconv.Itoa(int(payload.Port)))
+
+			ip := net.ParseIP(payload.OriginAddr)
+
+			if ip == nil {
+				// SISH does not send remote ip for OriginAddr
+				raddr = &unresolvedTCPAddr{
+					Host: payload.OriginAddr,
+					Port: int(payload.OriginPort),
+				}
+			} else {
+				raddr = &net.TCPAddr{
+					IP:   ip,
+					Port: int(payload.OriginPort),
+				}
+			}
 		default:
 			panic(fmt.Errorf("ssh: unknown channel type %s", channelType))
 		}
@@ -339,4 +354,17 @@ func (l *tcpListenerAlt) Close() error {
 // Addr returns the listener's network address.
 func (l *tcpListenerAlt) Addr() net.Addr {
 	return l.laddr
+}
+
+type unresolvedTCPAddr struct {
+	Host string
+	Port int
+}
+
+func (a *unresolvedTCPAddr) Network() string {
+	return "tcp"
+}
+
+func (a *unresolvedTCPAddr) String() string {
+	return net.JoinHostPort(a.Host, strconv.Itoa(a.Port))
 }
